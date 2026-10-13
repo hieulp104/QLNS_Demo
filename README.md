@@ -10,7 +10,7 @@ hợp đồng, thu/chi, vật tư, báo cáo, nhân sự, chấm công, nghỉ p
 ## Tech stack
 
 Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS 4
-PostgreSQL 15 + Prisma 7 · Auth.js v5 · MinIO · Docker Compose · Caddy
+PostgreSQL 15 + Prisma 7 · Auth.js v5 · MinIO · Docker Compose · nginx (trên VPS)
 
 ## Chạy trên máy dev
 
@@ -40,17 +40,25 @@ Kiểu deploy: **pull-and-build trên server** — `git pull` code mới rồi D
 build lại ảnh ngay trên VPS. Mỗi lần `up`, service `migrate` tự chạy migration + nạp
 dữ liệu demo (`db:seed`, kèm avatar) rồi mới bật app.
 
-Yêu cầu: VPS có Docker + Docker Compose plugin, cổng 80/443 mở, hai bản ghi DNS A
-(app + storage) trỏ về IP VPS.
+VPS dùng chung **nginx cài trên máy + certbot** với các web khác; container chỉ mở
+cổng trên `127.0.0.1`: app `8100`, MinIO `8101`.
 
 ### Lần đầu
+
+1. DNS (trang quản trị tên miền): 2 bản ghi A `@` và `storage` → IP VPS.
+2. Trên VPS:
 
 ```bash
 git clone https://github.com/hieulp104/QLNS_Demo.git /opt/demo/qlns-demo
 cd /opt/demo/qlns-demo
-cp .env.example .env
-nano .env    # sửa theo mục "CHỈ PRODUCTION" ở cuối file — sinh MỚI mọi mật khẩu/khóa
+# Tạo .env — sinh MỚI mọi mật khẩu/khóa (mẫu đầy đủ ở mục "CHỈ PRODUCTION" của .env.example)
 docker compose -f docker-compose.prod.yml up -d --build
+
+# nginx + HTTPS
+cp deploy/nginx-staffly.conf /etc/nginx/sites-available/staffly
+ln -s /etc/nginx/sites-available/staffly /etc/nginx/sites-enabled/staffly
+nginx -t && systemctl reload nginx
+certbot --nginx -d staffly.io.vn -d storage.staffly.io.vn
 ```
 
 ### Các lần sau
@@ -60,6 +68,7 @@ ssh root@<IP-VPS>
 cd /opt/demo/qlns-demo
 git pull
 docker compose -f docker-compose.prod.yml up -d --build
+docker image prune -f    # dọn ảnh cũ sau mỗi lần build, tránh đầy ổ
 ```
 
 Seed idempotent: dữ liệu khách tạo thêm được giữ, chỉ bản ghi mẫu (tên, phòng ban…)

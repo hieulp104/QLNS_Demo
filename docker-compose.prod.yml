@@ -4,8 +4,10 @@
 #        (tự migrate + nạp dữ liệu demo qua service `migrate` trước khi bật app)
 #
 # Khác docker-compose.yml (dev):
-#  · Có service `app` (Next) + `caddy` (reverse proxy + HTTPS tự động).
-#  · Postgres & MinIO KHÔNG map cổng ra ngoài — chỉ nội bộ Docker network.
+#  · Có service `app` (Next). HTTPS do nginx CÀI TRÊN VPS lo (dùng chung với
+#    các web khác + certbot) — xem deploy/nginx-staffly.conf.
+#  · App & MinIO chỉ mở cổng trên 127.0.0.1 cho nginx proxy vào; Postgres
+#    không mở cổng nào.
 #  · Biến nhạy cảm đọc từ .env (xem .env.example mục "CHỈ PRODUCTION").
 # ════════════════════════════════════════════════════════════════════
 name: na-demo
@@ -28,8 +30,8 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
-    expose:
-      - "3000" # chỉ nội bộ, Caddy proxy vào
+    ports:
+      - "127.0.0.1:8100:3000" # nginx: staffly.io.vn → đây
 
   postgres:
     image: postgres:15-alpine
@@ -58,6 +60,8 @@ services:
       MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Chua dat MINIO_ACCESS_KEY trong .env}
       MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Chua dat MINIO_SECRET_KEY trong .env}
       TZ: Asia/Ho_Chi_Minh
+    ports:
+      - "127.0.0.1:8101:9000" # nginx: storage.staffly.io.vn → đây (API S3)
     volumes:
       - minio_data:/data
     healthcheck:
@@ -79,8 +83,8 @@ services:
     env_file: .env
     environment:
       NODE_ENV: production
-      # Seed upload avatar thẳng vào MinIO qua mạng nội bộ — lúc này Caddy (và
-      # domain storage công khai trong .env) chưa chắc đã chạy.
+      # Seed upload avatar thẳng vào MinIO qua mạng nội bộ, không phụ thuộc
+      # DNS/HTTPS của domain storage công khai trong .env.
       MINIO_ENDPOINT: minio
       MINIO_PORT: "9000"
       MINIO_USE_SSL: "false"
@@ -91,27 +95,6 @@ services:
         condition: service_healthy
     command: sh -c "npx prisma migrate deploy && npm run db:seed"
 
-  caddy:
-    image: caddy:2-alpine
-    container_name: na-demo-caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp" # HTTP/3
-    environment:
-      APP_DOMAIN: ${APP_DOMAIN:?Chua dat APP_DOMAIN trong .env}
-      STORAGE_DOMAIN: ${STORAGE_DOMAIN:?Chua dat STORAGE_DOMAIN trong .env}
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy_data:/data # chứng chỉ Let's Encrypt — đừng xóa
-      - caddy_config:/config
-    depends_on:
-      - app
-      - minio
-
 volumes:
   postgres_data:
   minio_data:
-  caddy_data:
-  caddy_config:

@@ -20,4 +20,3 @@ docs
 npm-debug.log*
 Dockerfile
 docker-compose*.yml
-Caddyfile
