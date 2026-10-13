@@ -1,0 +1,23 @@
+# Không đưa vào build context — giảm dung lượng & tránh rò rỉ secret.
+node_modules
+.next
+.git
+.github
+coverage
+.vscode
+
+# Prisma Client sinh lại trong lúc build (prisma generate)
+src/generated/prisma
+
+# Secret & hạ tầng — KHÔNG bao giờ copy .env vào ảnh
+.env
+.env.*
+!.env.example
+
+# Tài liệu / file phụ không cần khi chạy
+*.md
+docs
+npm-debug.log*
+Dockerfile
+docker-compose*.yml
+Caddyfile

@@ -1,0 +1,51 @@
+name: Deploy to VPS
+
+# Deploy THỦ CÔNG: vào tab Actions → chọn workflow này → "Run workflow"
+# → chọn nhánh muốn deploy → chạy. Không tự chạy khi push.
+on:
+  workflow_dispatch:
+
+# Không cho 2 lần deploy chồng nhau.
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy qua SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          # Nhánh được chọn ở ô "Run workflow" chính là github.ref_name.
+          script: |
+            set -euo pipefail
+            cd ~/qlns-demo
+            echo "▶ Kéo code nhánh ${{ github.ref_name }}"
+            git fetch --all --prune
+            git reset --hard "origin/${{ github.ref_name }}"
+
+            echo "▶ Build ảnh app + migrate"
+            docker compose -f docker-compose.prod.yml build app migrate
+
+            echo "▶ Bật DB + MinIO (nếu chưa chạy)"
+            docker compose -f docker-compose.prod.yml up -d postgres minio
+
+            echo "▶ Chạy migration (migrate deploy — KHÔNG phải migrate dev)"
+            docker compose -f docker-compose.prod.yml run --rm migrate
+
+            echo "▶ Đồng bộ quyền mới của phiên bản"
+            # migrate chỉ đổi CẤU TRÚC bảng. Quyền sống ở dòng dữ liệu trong
+            # role_permissions, thiếu bước này thì tính năng mới không ai thấy.
+            # Script chỉ THÊM mã quyền mới, không đè tùy chỉnh trong /permissions.
+            docker compose -f docker-compose.prod.yml run --rm migrate npm run permissions:sync
+
+            echo "▶ Khởi động lại toàn bộ"
+            docker compose -f docker-compose.prod.yml up -d
+
+            echo "▶ Dọn ảnh Docker cũ"
+            docker image prune -f
+            echo "✅ Deploy xong"

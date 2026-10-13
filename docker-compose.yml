@@ -1,0 +1,50 @@
+# NA — hạ tầng phát triển (Postgres + MinIO)
+name: na-demo
+# Dùng: docker compose up -d
+# Bản production (thêm service app + nginx) sẽ bổ sung ở Phase 5 — xem CLAUDE.md.
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: na-demo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: na
+      POSTGRES_PASSWORD: na_dev_password
+      POSTGRES_DB: na
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      # Lệch cổng để chạy song song với QLNS (5433) trên cùng máy dev.
+      - "5434:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U na -d na"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: na-demo-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: na_dev
+      MINIO_ROOT_PASSWORD: na_dev_password
+      TZ: Asia/Ho_Chi_Minh
+    ports:
+      # Lệch khỏi 9000/9001 mặc định để không đụng dự án khác trên cùng máy dev.
+      - "9102:9000" # API S3
+      - "9103:9001" # Console web
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  minio_data:

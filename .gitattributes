@@ -1,0 +1,10 @@
+# Chuẩn hóa xuống dòng — cả nhóm dev trên Windows, tránh diff toàn file do CRLF/LF.
+* text=auto eol=lf
+
+# File nhị phân — không đụng vào
+*.docx binary
+*.xlsx binary
+*.png binary
+*.jpg binary
+*.ico binary
+*.pdf binary

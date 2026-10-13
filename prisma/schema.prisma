@@ -1,0 +1,1043 @@
+// ═══════════════════════════════════════════════════════════════════
+// NA — Hệ thống quản lý nội bộ công ty thiết kế & thi công nội thất
+// Schema đã được duyệt — xem CLAUDE.md mục "Quyết định schema" trước khi sửa.
+// Quy ước: model PascalCase · bảng snake_case qua @@map · enum SCREAMING_SNAKE
+// Tiền tệ: Decimal(15,0) — VND không có phần thập phân. TUYỆT ĐỐI không dùng Float.
+// ═══════════════════════════════════════════════════════════════════
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ═══════════════════ ENUMS ═══════════════════
+
+/// Phạm vi áp dụng của một quyền — mấu chốt của RBAC.
+/// ALL = toàn hệ thống · DEPARTMENT = phòng mình · ASSIGNED = dự án được add · SELF = của chính mình
+enum PermissionScope {
+  ALL
+  DEPARTMENT
+  ASSIGNED
+  SELF
+}
+
+/// Phân biệt người dùng tương tác với tài khoản dịch vụ nội bộ.
+enum UserType {
+  HUMAN
+  AI_AGENT
+}
+
+enum AiMessageRole {
+  USER
+  ASSISTANT
+}
+
+enum DepartmentCode {
+  SALES // Kinh doanh
+  ACCOUNTING // Kế toán
+  DESIGN // Thiết kế
+  CONSTRUCTION // Thi công
+}
+
+enum ProjectType {
+  INTERIOR // Thiết kế nội thất
+  ARCHITECTURE // Thiết kế kiến trúc
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ON_HOLD
+  WARRANTY // Đang trong thời gian bảo hành (giai đoạn 9) — thoát khỏi "đang chạy"
+  COMPLETED
+  CANCELLED
+}
+
+/// Quy trình SOP 9 giai đoạn — thứ tự cố định, xem STAGE_ORDER trong src/lib/constants.ts
+enum ProjectStage {
+  INTAKE // 1. Tiếp nhận khách hàng
+  SURVEY_3D // 2. Khảo sát – Tư vấn – Thiết kế 3D (cọc thiết kế 30%)
+  REVISE_QUOTE // 3. Chỉnh sửa 3D – Bóc tách khối lượng – Báo giá
+  CONTRACT // 4. Ký hợp đồng và đặt cọc
+  TECH_DRAWING // 5. Bản vẽ kỹ thuật (AutoCAD) – Chốt kích thước – CNC
+  PROCUREMENT // 6. Đặt vật tư – Gia công xưởng
+  CONSTRUCTION // 7. Thi công – Lắp đặt nội thất – Hoàn thiện
+  HANDOVER // 8. Nghiệm thu tổng thể – Bàn giao – Đề nghị thanh toán
+  WARRANTY // 9. Bảo hành 5 năm – Chăm sóc khách hàng
+}
+
+/// Mảng phụ trách của thành viên trong dự án
+enum MemberArea {
+  SALES
+  DESIGN
+  CONSTRUCTION
+}
+
+enum ContractType {
+  DESIGN
+  CONSTRUCTION
+  COMBINED
+  ANNEX // Phụ lục
+}
+
+enum ContractStatus {
+  DRAFT
+  SIGNED
+  LIQUIDATED
+  CANCELLED
+}
+
+enum CustomerSource {
+  REFERRAL // Giới thiệu
+  FACEBOOK
+  ZALO
+  WEBSITE
+  WALK_IN
+  OTHER
+}
+
+enum TxnDirection {
+  INCOME // Thu
+  EXPENSE // Chi
+}
+
+enum TxnType {
+  DESIGN_DEPOSIT // Cọc thiết kế
+  CONTRACT_DEPOSIT // Cọc hợp đồng
+  PROGRESS_PAYMENT // Thanh toán tiến độ
+  FINAL_PAYMENT // Thanh toán cuối
+  MATERIAL_COST // Chi phí vật tư
+  FACTORY_COST // Gia công xưởng
+  SUBCONTRACTOR_COST // Nhân công thầu phụ
+  TRANSPORT_COST // Vận chuyển
+  OTHER
+  SALARY_COST // Chi lương (tạm ứng + thực nhận) — chỉ bảng lương sinh ra
+  INSURANCE_COST // BHXH trừ lương nhân viên — chỉ bảng lương sinh ra
+  OPERATING_COST // Chi khác: chi phí chung ngoài vật tư/lương — bắt buộc kèm ExpenseCategory
+}
+
+/// PENDING = đã ghi nhận · COMPLETED = đã thực thu/chi. Báo cáo phân biệt 2 loại này.
+enum TxnStatus {
+  PENDING
+  COMPLETED
+}
+
+/// Nguồn tạo giao dịch. Mọi nguồn khác MANUAL do hệ thống sinh và chỉ đọc trong Finance.
+enum TxnSource {
+  MANUAL
+  MATERIAL_SYNC // Tổng hợp từ Material, mỗi dự án × mỗi tháng một dòng
+  PAYROLL_SYNC // Từ Bảng lương: mỗi phiếu ứng một dòng + mỗi kỳ đã chốt hai dòng
+}
+
+enum FileKind {
+  MODEL_3D
+  CAD_DRAWING
+  CONTRACT_DOC
+  QUOTATION
+  BOQ
+  RENDER_IMAGE
+  SITE_PHOTO
+  MATERIAL_DOC
+  AVATAR
+  OTHER
+}
+
+// ═══════════════════ RBAC & NHÂN SỰ ═══════════════════
+
+model Department {
+  id        String         @id @default(cuid())
+  code      DepartmentCode @unique
+  name      String
+  managerId String?        @unique @map("manager_id")
+  createdAt DateTime       @default(now()) @map("created_at")
+  updatedAt DateTime       @updatedAt @map("updated_at")
+
+  manager User?  @relation("DepartmentManager", fields: [managerId], references: [id])
+  members User[] @relation("DepartmentMembers")
+
+  @@map("departments")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  employeeCode String   @unique @map("employee_code")
+  /// Không bắt buộc: thợ lớn tuổi không dùng email, đăng nhập bằng SĐT.
+  /// CHECK trong DB bắt buộc có ít nhất một trong hai (email / phone).
+  email        String?  @unique
+  passwordHash String   @map("password_hash")
+  fullName     String   @map("full_name")
+  /// Cũng là tên đăng nhập. Lưu dạng chỉ chữ số (0912345678).
+  /// Không trùng giữa những người CHƯA nghỉ — partial unique index
+  /// `users_active_phone_key` trong migration, Prisma không biểu diễn được.
+  phone        String?
+  avatarUrl    String?  @map("avatar_url")
+  position     String? // Chức vụ
+  departmentId String?  @map("department_id")
+  userType     UserType @default(HUMAN) @map("user_type")
+
+  isActive           Boolean   @default(true) @map("is_active")
+  mustChangePassword Boolean   @default(true) @map("must_change_password")
+  joinedAt           DateTime? @map("joined_at")
+  lastLoginAt        DateTime? @map("last_login_at")
+
+  /// Soft delete — nhân viên nghỉ việc. Mọi query mặc định lọc deletedAt = null.
+  deletedAt     DateTime? @map("deleted_at")
+  deletedReason String?   @map("deleted_reason")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  department        Department?      @relation("DepartmentMembers", fields: [departmentId], references: [id])
+  managedDepartment Department?      @relation("DepartmentManager")
+  roles             UserRole[]
+  projectMembers    ProjectMember[]
+  createdProjects   Project[]        @relation("ProjectCreatedBy")
+  createdCustomers  Customer[]       @relation("CustomerCreatedBy")
+  stageLogs         StageLog[]
+  comments          ProjectComment[]
+  uploadedFiles     FileAsset[]
+  transactions      Transaction[]    @relation("TransactionCreatedBy")
+  auditLogs         AuditLog[]
+
+  /// ⚠ ĐÃ THAY BẰNG `SalaryRecord`. Ba cột dưới đây là dữ liệu lương CŨ, giữ lại
+  /// để đối chiếu sau khi chuyển đổi, KHÔNG được đọc ở bất kỳ luồng tính lương nào.
+  /// Cố tình đổi tên thành `legacy*` để mọi chỗ code lỡ còn dùng sẽ vỡ ở `tsc`
+  /// chứ không âm thầm lấy số cũ. Xóa hẳn ở một đợt sau, khi kế toán đã chạy trọn
+  /// một kỳ lương bằng mốc mới và xác nhận số khớp.
+  legacyBaseSalary    Decimal? @map("legacy_base_salary") @db.Decimal(15, 0)
+  legacyInsuranceBase Decimal? @map("legacy_insurance_base") @db.Decimal(15, 0)
+  legacyIsFixedSalary Boolean  @default(false) @map("legacy_is_fixed_salary")
+
+  salaryRecords SalaryRecord[] @relation("SalaryRecordUser")
+
+  attendanceDays    AttendanceDay[] @relation("AttendanceUser")
+  updatedAttendance AttendanceDay[] @relation("AttendanceUpdatedBy")
+  leaveRequests     LeaveRequest[]  @relation("LeaveRequester")
+  approvedLeaves    LeaveRequest[]  @relation("LeaveApprover")
+  salaryAdvances    SalaryAdvance[] @relation("AdvanceUser")
+  createdAdvances   SalaryAdvance[] @relation("AdvanceCreatedBy")
+  payrollLines      PayrollLine[]   @relation("PayrollUser")
+  lockedPayrolls    PayrollPeriod[] @relation("PayrollLockedBy")
+
+  notifications      Notification[] @relation("NotificationRecipient")
+  actedNotifications Notification[] @relation("NotificationActor")
+
+  assignedMaintenance MaintenanceTask[] @relation("MaintenanceAssignee")
+  handledMaintenance  MaintenanceTask[] @relation("MaintenanceHandledBy")
+  createdMaintenance  MaintenanceTask[] @relation("MaintenanceCreatedBy")
+
+  aiConversations    AiConversation[] @relation("AiConversationOwner")
+  agentConversations AiConversation[] @relation("AiConversationAgent")
+
+  @@index([userType, departmentId, deletedAt])
+  @@index([email])
+  @@map("users")
+}
+
+// ═══════════════════ NA AI ═══════════════════
+
+/// Cuộc hội thoại thuộc riêng một người dùng thật và chạy dưới một AI principal.
+model AiConversation {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  agentId   String   @map("agent_id")
+  title     String
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user     User        @relation("AiConversationOwner", fields: [userId], references: [id], onDelete: Cascade)
+  agent    User        @relation("AiConversationAgent", fields: [agentId], references: [id])
+  messages AiMessage[]
+
+  @@index([userId, updatedAt])
+  @@index([agentId])
+  @@map("ai_conversations")
+}
+
+/// Chỉ lưu nội dung người dùng và câu trả lời cuối; dữ liệu công cụ không được lưu nguyên khối.
+model AiMessage {
+  id             String        @id @default(cuid())
+  conversationId String        @map("conversation_id")
+  role           AiMessageRole
+  content        String
+  createdAt      DateTime      @default(now()) @map("created_at")
+
+  conversation AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+  @@map("ai_messages")
+}
+
+/// Vai trò — Director sửa/thêm được qua UI. 9 role hệ thống được seed sẵn (isSystem = true).
+model Role {
+  id          String   @id @default(cuid())
+  code        String   @unique // DIRECTOR, HEAD_SALES, STAFF_DESIGN...
+  name        String
+  description String?
+  /// Role hệ thống: không cho xóa, không cho đổi code.
+  isSystem    Boolean  @default(false) @map("is_system")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+/// Danh mục quyền — cố định trong code (src/lib/permissions.ts), seed vào DB để gán cho role.
+model Permission {
+  id          String   @id @default(cuid())
+  code        String   @unique // "project.create", "finance.view"...
+  module      String // project, finance, hr...
+  name        String
+  description String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  roles RolePermission[]
+
+  @@index([module])
+  @@map("permissions")
+}
+
+/// 1 user có thể mang nhiều role — xử lý trường hợp kiêm nhiệm.
+model UserRole {
+  userId     String   @map("user_id")
+  roleId     String   @map("role_id")
+  assignedAt DateTime @default(now()) @map("assigned_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+/// Quyền của role + phạm vi. Đây là bảng Director chỉnh để đổi phân quyền mà không cần deploy.
+model RolePermission {
+  roleId       String          @map("role_id")
+  permissionId String          @map("permission_id")
+  scope        PermissionScope @default(ALL)
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// ═══════════════════ KHÁCH HÀNG ═══════════════════
+
+model Customer {
+  id           String         @id @default(cuid())
+  code         String         @unique // KH-2026-001
+  name         String
+  phone        String?
+  email        String?
+  address      String?
+  source       CustomerSource @default(OTHER)
+  sourceDetail String?        @map("source_detail") // Bắt buộc nhập khi source = OTHER
+  note         String?
+  createdById  String?        @map("created_by_id")
+  deletedAt    DateTime?      @map("deleted_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updatedAt    DateTime       @updatedAt @map("updated_at")
+
+  createdBy User?     @relation("CustomerCreatedBy", fields: [createdById], references: [id])
+  projects  Project[]
+
+  @@index([name])
+  @@index([phone])
+  @@index([deletedAt])
+  @@map("customers")
+}
+
+// ═══════════════════ DỰ ÁN ═══════════════════
+
+model Project {
+  id           String      @id @default(cuid())
+  code         String      @unique // TN-2026-014 — tự sinh, không sửa tay
+  name         String
+  customerId   String      @map("customer_id")
+  type         ProjectType
+  /// Loại hình công trình: nhà phố / chung cư / biệt thự / văn phòng / showroom
+  propertyType String?     @map("property_type")
+
+  currentStage ProjectStage  @default(INTAKE) @map("current_stage")
+  status       ProjectStatus @default(ACTIVE)
+
+  /// Giá trị dự kiến (VND). ⚠ Ẩn với phòng Thiết kế / Thi công — xem lib/permissions.ts
+  estimatedValue Decimal? @map("estimated_value") @db.Decimal(15, 0)
+
+  address     String?
+  description String?
+
+  startDate       DateTime? @map("start_date")
+  expectedEndDate DateTime? @map("expected_end_date")
+  actualEndDate   DateTime? @map("actual_end_date")
+
+  createdById String?   @map("created_by_id")
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  customer     Customer          @relation(fields: [customerId], references: [id])
+  createdBy    User?             @relation("ProjectCreatedBy", fields: [createdById], references: [id])
+  members      ProjectMember[]
+  stageLogs    StageLog[]
+  comments     ProjectComment[]
+  files        FileAsset[]
+  contracts    Contract[]
+  materials    Material[]
+  transactions Transaction[]
+  maintenance  MaintenanceTask[]
+
+  @@index([currentStage])
+  @@index([customerId])
+  @@index([type])
+  @@index([status, deletedAt])
+  @@map("projects")
+}
+
+/// Thành viên được add vào dự án — quyết định quyền "sửa nội dung dự án" (scope ASSIGNED).
+model ProjectMember {
+  id        String     @id @default(cuid())
+  projectId String     @map("project_id")
+  userId    String     @map("user_id")
+  area      MemberArea
+  addedAt   DateTime   @default(now()) @map("added_at")
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@unique([projectId, userId, area])
+  @@index([userId])
+  @@map("project_members")
+}
+
+/// Log chuyển giai đoạn — bắt buộc ghi mỗi lần đổi currentStage.
+model StageLog {
+  id          String        @id @default(cuid())
+  projectId   String        @map("project_id")
+  fromStage   ProjectStage? @map("from_stage")
+  toStage     ProjectStage  @map("to_stage")
+  changedById String?       @map("changed_by_id")
+  note        String?
+  createdAt   DateTime      @default(now()) @map("created_at")
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  changedBy User?   @relation(fields: [changedById], references: [id])
+
+  @@index([projectId, createdAt])
+  @@map("stage_logs")
+}
+
+/// Bình luận / chú thích trong dự án — MỌI nhân viên đều được đăng.
+model ProjectComment {
+  id        String    @id @default(cuid())
+  projectId String    @map("project_id")
+  authorId  String    @map("author_id")
+  content   String
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  project Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  author  User        @relation(fields: [authorId], references: [id])
+  files   FileAsset[]
+
+  @@index([projectId, createdAt])
+  @@map("project_comments")
+}
+
+// ═══════════════════ HỢP ĐỒNG ═══════════════════
+
+model Contract {
+  id        String         @id @default(cuid())
+  code      String         @unique
+  projectId String         @map("project_id")
+  type      ContractType
+  status    ContractStatus @default(SIGNED)
+
+  value         Decimal   @db.Decimal(15, 0)
+  depositAmount Decimal?  @map("deposit_amount") @db.Decimal(15, 0)
+  signedDate    DateTime? @map("signed_date")
+  note          String?
+
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  project      Project       @relation(fields: [projectId], references: [id])
+  files        FileAsset[]
+  transactions Transaction[]
+
+  @@index([projectId])
+  @@map("contracts")
+}
+
+// ═══════════════════ VẬT TƯ ═══════════════════
+
+/// Danh mục vật tư MỞ — người dùng tự thêm, không cố định cứng (yêu cầu mục 2.5).
+model MaterialCatalog {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  unit          String // cái, m2, tấm, bộ...
+  category      String? // nhóm vật tư, free text
+  specification String?
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  materials Material[]
+
+  @@map("material_catalogs")
+}
+
+/// Dòng vật tư dùng cho 1 dự án cụ thể.
+model Material {
+  id        String  @id @default(cuid())
+  projectId String  @map("project_id")
+  catalogId String? @map("catalog_id")
+
+  /// Tên tự nhập khi không chọn từ danh mục
+  name           String
+  unit           String
+  quantity       Decimal  @db.Decimal(14, 2)
+  /// ⚠ Ẩn với phòng Thiết kế / Thi công
+  unitPrice      Decimal? @map("unit_price") @db.Decimal(15, 0)
+  /// Ngày nghiệp vụ do người dùng ghi nhận, tách biệt timestamp hệ thống.
+  materialDate   DateTime @default(now()) @map("material_date")
+  additionalCost Decimal  @default(0) @map("additional_cost") @db.Decimal(15, 0)
+  note           String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  project Project          @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  catalog MaterialCatalog? @relation(fields: [catalogId], references: [id])
+  files   FileAsset[]
+
+  @@index([projectId])
+  @@map("materials")
+}
+
+// ═══════════════════ TÀI CHÍNH ═══════════════════
+
+model Transaction {
+  id         String       @id @default(cuid())
+  code       String       @unique
+  projectId  String?      @map("project_id")
+  contractId String?      @map("contract_id")
+  direction  TxnDirection
+  type       TxnType
+  status     TxnStatus    @default(PENDING)
+  source     TxnSource    @default(MANUAL)
+
+  amount        Decimal  @db.Decimal(15, 0)
+  txnDate       DateTime @map("txn_date")
+  paymentMethod String?  @map("payment_method")
+  note          String?
+
+  createdById String?   @map("created_by_id")
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  /// PAYROLL_SYNC: kỳ lương sinh ra dòng "Chi lương" / "BHXH" này.
+  /// Partial unique index `transactions_active_payroll_period_type_key`:
+  /// mỗi kỳ × mỗi loại chỉ một dòng đang hoạt động.
+  payrollPeriodId String? @map("payroll_period_id")
+  /// PAYROLL_SYNC: phiếu ứng lương sinh ra dòng chi này (1–1).
+  salaryAdvanceId String? @unique @map("salary_advance_id")
+  /// OPERATING_COST: danh mục chi khác (thuê xưởng, điện, xe ô tô…). CHECK
+  /// `transactions_operating_cost_category_check`: có ⇔ type = OPERATING_COST.
+  expenseCategoryId String? @map("expense_category_id")
+
+  project         Project?         @relation(fields: [projectId], references: [id])
+  contract        Contract?        @relation(fields: [contractId], references: [id])
+  createdBy       User?            @relation("TransactionCreatedBy", fields: [createdById], references: [id])
+  payrollPeriod   PayrollPeriod?   @relation(fields: [payrollPeriodId], references: [id])
+  salaryAdvance   SalaryAdvance?   @relation(fields: [salaryAdvanceId], references: [id])
+  expenseCategory ExpenseCategory? @relation(fields: [expenseCategoryId], references: [id])
+  files           FileAsset[]
+
+  @@index([payrollPeriodId])
+  @@index([expenseCategoryId, txnDate])
+  @@index([projectId, txnDate])
+  @@index([status])
+  @@index([direction, txnDate])
+  @@map("transactions")
+}
+
+/// Danh mục "Chi khác" do kế toán tự đặt tên — các khoản chi chung không thuộc
+/// vật tư hay lương (thuê xưởng, điện xưởng, quỹ VP, xe ô tô, thưởng doanh số…).
+/// Mỗi danh mục là một dòng riêng trong "Cơ cấu chi phí", nên số của khoản này
+/// không lẫn sang khoản khác. Danh mục đã có giao dịch chỉ ngưng dùng, không xóa.
+model ExpenseCategory {
+  id            String   @id @default(cuid())
+  name          String   @unique
+  /// Khoản cố định hàng tháng — nút "Ghi khoản cố định" tạo sẵn cho tháng chọn.
+  isRecurring   Boolean  @default(false) @map("is_recurring")
+  /// Số tiền điền sẵn cho khoản cố định. Trống = số đổi theo tháng (điện…).
+  defaultAmount Decimal? @map("default_amount") @db.Decimal(15, 0)
+  sortOrder     Int      @default(0) @map("sort_order")
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  transactions Transaction[]
+
+  @@map("expense_categories")
+}
+
+// ═══════════════════ FILE (MinIO) ═══════════════════
+
+/// DB chỉ lưu metadata + objectKey. File thật nằm trong MinIO, truy cập qua presigned URL.
+/// Liên kết mềm: đúng 1 trong các FK dưới có giá trị.
+model FileAsset {
+  id           String   @id @default(cuid())
+  fileName     String   @map("file_name")
+  objectKey    String   @unique @map("object_key")
+  mimeType     String   @map("mime_type")
+  sizeBytes    BigInt   @map("size_bytes")
+  kind         FileKind
+  /// Chú thích ảnh render / ảnh thi công
+  caption      String?
+  uploadedById String?  @map("uploaded_by_id")
+
+  projectId     String? @map("project_id")
+  commentId     String? @map("comment_id")
+  contractId    String? @map("contract_id")
+  materialId    String? @map("material_id")
+  transactionId String? @map("transaction_id")
+
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  uploadedBy  User?           @relation(fields: [uploadedById], references: [id])
+  project     Project?        @relation(fields: [projectId], references: [id])
+  comment     ProjectComment? @relation(fields: [commentId], references: [id])
+  contract    Contract?       @relation(fields: [contractId], references: [id])
+  material    Material?       @relation(fields: [materialId], references: [id])
+  transaction Transaction?    @relation(fields: [transactionId], references: [id])
+
+  @@index([projectId, kind])
+  @@index([contractId])
+  @@map("file_assets")
+}
+
+// ═══════════════════ AUDIT LOG ═══════════════════
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String?  @map("actor_id")
+  action    String // PROJECT_CREATE, STAGE_CHANGE, TXN_DELETE...
+  entity    String // Project, Transaction, User...
+  entityId  String?  @map("entity_id")
+  before    Json?
+  after     Json?
+  ipAddress String?  @map("ip_address")
+  userAgent String?  @map("user_agent")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  actor User? @relation(fields: [actorId], references: [id])
+
+  @@index([actorId, createdAt])
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
+
+// ═══════════════════ BẢO TRÌ / BẢO HÀNH SAU BÀN GIAO ═══════════════════
+
+/// Hai loại việc bảo hành, dùng chung một bảng vì luồng xử lý giống hệt nhau
+/// (giao người → đi kiểm tra → ghi kết quả), chỉ khác nguồn phát sinh.
+enum MaintenanceKind {
+  SCHEDULED_CHECK // Lịch kiểm tra định kỳ sau bàn giao (mốc 3/6/12 tháng)
+  CUSTOMER_REQUEST // Khách báo hỏng, đề nghị bảo hành
+}
+
+enum MaintenanceStatus {
+  PENDING // Chờ xử lý
+  IN_PROGRESS // Đã cử người, đang xử lý
+  DONE // Đã xử lý xong
+  CANCELLED // Bỏ qua / không cần xử lý nữa
+}
+
+/// Khách báo hỏng nặng thì đẩy lên đầu "Việc cần chú ý" của Dashboard.
+enum MaintenancePriority {
+  NORMAL
+  URGENT
+}
+
+/// Việc bảo hành của một dự án đã bàn giao.
+/// Lịch định kỳ do hệ thống tự sinh (xem syncScheduledChecks trong
+/// maintenance.service.ts); đề nghị của khách do người dùng nhập tay.
+model MaintenanceTask {
+  id          String          @id @default(cuid())
+  projectId   String          @map("project_id")
+  kind        MaintenanceKind
+  title       String
+  description String?
+
+  /// Mốc định kỳ tính bằng tháng kể từ ngày bàn giao (3 · 6 · 12).
+  /// null với lịch thêm tay và với đề nghị của khách.
+  milestoneMonths Int? @map("milestone_months")
+
+  /// Hạn xử lý. Lịch định kỳ = ngày bàn giao + mốc. Đề nghị của khách có thể để trống.
+  dueDate DateTime? @map("due_date")
+
+  /// Ngày khách báo hỏng — chỉ dùng cho CUSTOMER_REQUEST.
+  reportedAt DateTime? @map("reported_at")
+
+  /// Ai bên khách báo + số điện thoại, ghi tự do. Thông tin khách chính lấy từ Project.
+  reporterNote String? @map("reporter_note")
+
+  priority MaintenancePriority @default(NORMAL)
+  status   MaintenanceStatus   @default(PENDING)
+
+  /// Người được cử đi kiểm tra / sửa chữa.
+  assigneeId  String?   @map("assignee_id")
+  handledById String?   @map("handled_by_id")
+  handledAt   DateTime? @map("handled_at")
+  /// Kết quả kiểm tra / sửa chữa, ghi lúc đánh dấu đã xử lý.
+  resultNote  String?   @map("result_note")
+
+  createdById String?   @map("created_by_id")
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  project   Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignee  User?   @relation("MaintenanceAssignee", fields: [assigneeId], references: [id])
+  handledBy User?   @relation("MaintenanceHandledBy", fields: [handledById], references: [id])
+  createdBy User?   @relation("MaintenanceCreatedBy", fields: [createdById], references: [id])
+
+  /// Chống sinh trùng mốc khi chạy lại đồng bộ. NULL không tính là trùng trong
+  /// PostgreSQL nên lịch thêm tay và đề nghị của khách không bị ràng buộc này.
+  @@unique([projectId, milestoneMonths])
+  @@index([status, dueDate])
+  @@index([projectId, kind])
+  @@index([assigneeId, status])
+  @@map("maintenance_tasks")
+}
+
+// ═══════════════════ CẤU HÌNH HỆ THỐNG ═══════════════════
+
+/// Tham số Giám đốc sửa được qua UI mà không cần deploy lại.
+/// Khóa đang dùng: "maintenance.milestones" = { "months": [3, 6, 12] }
+model SystemSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("system_settings")
+}
+
+// ═══════════════════ THÔNG BÁO TRONG HỆ THỐNG ═══════════════════
+
+/// Loại sự kiện sinh thông báo. Mỗi loại quyết định ai là người nhận —
+/// xem recipients* trong notifications.service.ts.
+enum NotificationType {
+  PROJECT_MEMBER_ADDED // Được thêm vào một dự án
+  PROJECT_STAGE_CHANGED // Dự án mình tham gia chuyển giai đoạn
+  PROJECT_COMMENT // Có bình luận mới trong dự án mình tham gia
+  PROJECT_OVERDUE // Dự án quá hạn hoàn thành dự kiến
+  MAINTENANCE_REQUEST_NEW // Khách vừa đề nghị bảo hành
+  MAINTENANCE_ASSIGNED // Được giao đi kiểm tra / sửa bảo hành
+  MAINTENANCE_DUE // Lịch bảo trì tới hạn
+  CONTRACT_UNDERPAID // Hợp đồng đã ký chưa thu đủ — CHỈ người có finance.view
+  LEAVE_REQUEST_PENDING // (Giai đoạn 2 — nghỉ phép) chưa dùng
+  LEAVE_REQUEST_RESULT // (Giai đoạn 2 — nghỉ phép) chưa dùng
+  SYSTEM
+}
+
+/// Mỗi người nhận là MỘT dòng riêng — trạng thái đã đọc là của từng người.
+/// Danh sách người nhận phải được lọc qua quyền TRƯỚC khi ghi, và tiêu đề /
+/// nội dung TUYỆT ĐỐI không chứa số tiền: bảng này gửi tới mọi vai trò nên
+/// nhét tiền vào đây là đường vòng phá nguyên tắc ẩn tiền.
+model Notification {
+  id          String           @id @default(cuid())
+  recipientId String           @map("recipient_id")
+  type        NotificationType
+  title       String
+  body        String?
+  /// Bấm vào thì mở trang nào, vd /projects/abc?tab=bao-hanh
+  href        String?
+  entity      String? // "Project" | "MaintenanceTask" | "Contract"
+  entityId    String?          @map("entity_id")
+  /// Người gây ra sự kiện. null = hệ thống (script nhắc việc định kỳ).
+  actorId     String?          @map("actor_id")
+  readAt      DateTime?        @map("read_at")
+  createdAt   DateTime         @default(now()) @map("created_at")
+
+  recipient User  @relation("NotificationRecipient", fields: [recipientId], references: [id], onDelete: Cascade)
+  actor     User? @relation("NotificationActor", fields: [actorId], references: [id])
+
+  @@index([recipientId, readAt, createdAt])
+  @@index([recipientId, type, entityId])
+  @@map("notifications")
+}
+
+// ═══════════════════ CHẤM CÔNG ═══════════════════
+
+/// Ký hiệu chấm công — giữ nguyên bộ ký hiệu công ty đang dùng trên Excel.
+/// ANNUAL_LEAVE chừa sẵn cho phép năm có lương; công ty CHƯA áp dụng.
+enum AttendanceMark {
+  FULL // X — đủ công (1.0)
+  HALF // / — nửa công (0.5)
+  ABSENT // N — nghỉ không lương (0)
+  HOLIDAY // L — nghỉ lễ có lương (1.0)
+  ANNUAL_LEAVE // P — phép năm có lương (1.0) — chưa dùng
+}
+
+/// Một ô trong bảng chấm công tháng: một người, một ngày.
+/// Ngày không có bản ghi = CHƯA CHẤM, khác hẳn với chấm N (nghỉ không lương).
+model AttendanceDay {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+
+  /// Ngày dương lịch. Dùng @db.Date để không dính lệch múi giờ khi đổi tháng.
+  workDate DateTime       @map("work_date") @db.Date
+  mark     AttendanceMark
+
+  /// Giờ tăng ca trong ngày — bảng "Ngày tăng ca" bên phải file Excel.
+  /// Quy ra công theo cấu hình payroll.overtimeHoursPerDay (mặc định 4 giờ = 1 công).
+  overtimeHours Decimal @default(0) @map("overtime_hours") @db.Decimal(5, 2)
+
+  note        String?
+  updatedById String?  @map("updated_by_id")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  user      User  @relation("AttendanceUser", fields: [userId], references: [id], onDelete: Cascade)
+  updatedBy User? @relation("AttendanceUpdatedBy", fields: [updatedById], references: [id])
+
+  @@unique([userId, workDate])
+  @@index([workDate])
+  @@map("attendance_days")
+}
+
+// ═══════════════════ NGHỈ PHÉP ═══════════════════
+
+/// Loại nghỉ. Mỗi loại quyết định ký hiệu ghi vào bảng chấm công khi đơn được duyệt.
+enum LeaveType {
+  UNPAID // Nghỉ không lương → ghi N
+  HOLIDAY // Nghỉ lễ có lương → ghi L
+  ANNUAL // Phép năm có lương → ghi P (công ty chưa áp dụng)
+  SICK // Nghỉ ốm → ghi N (chưa có chế độ riêng)
+  OTHER
+}
+
+enum LeaveStatus {
+  PENDING // Chờ duyệt
+  APPROVED // Đã duyệt — đã ghi vào bảng chấm công
+  REJECTED // Bị từ chối
+  CANCELLED // Người nộp tự hủy khi chưa duyệt
+}
+
+model LeaveRequest {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+
+  type     LeaveType
+  fromDate DateTime  @map("from_date") @db.Date
+  toDate   DateTime  @map("to_date") @db.Date
+
+  /// Nghỉ nửa ngày — chỉ hợp lệ khi fromDate = toDate.
+  halfDay  Boolean @default(false) @map("half_day")
+  /// Số ngày nghỉ tính sẵn (0.5 cho nửa ngày) để khỏi tính lại khi thống kê.
+  dayCount Decimal @map("day_count") @db.Decimal(4, 1)
+
+  reason String
+  status LeaveStatus @default(PENDING)
+
+  approverId   String?   @map("approver_id")
+  decidedAt    DateTime? @map("decided_at")
+  decisionNote String?   @map("decision_note")
+
+  deletedAt DateTime? @map("deleted_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+
+  user     User  @relation("LeaveRequester", fields: [userId], references: [id], onDelete: Cascade)
+  approver User? @relation("LeaveApprover", fields: [approverId], references: [id])
+
+  @@index([userId, status])
+  @@index([status, fromDate])
+  @@map("leave_requests")
+}
+
+// ═══════════════════ ỨNG LƯƠNG & BẢNG LƯƠNG ═══════════════════
+
+enum AdvanceMethod {
+  CASH // Tiền mặt
+  TRANSFER // Chuyển khoản
+}
+
+/// Sổ ứng lương — đúng file "ỨNG LƯƠNG CỦA CNV" của công ty.
+/// Tổng ứng trong tháng được trừ thẳng vào bảng lương tháng đó.
+model SalaryAdvance {
+  id          String        @id @default(cuid())
+  userId      String        @map("user_id")
+  advanceDate DateTime      @map("advance_date") @db.Date
+  amount      Decimal       @db.Decimal(15, 0)
+  method      AdvanceMethod
+  note        String?
+
+  createdById String?   @map("created_by_id")
+  deletedAt   DateTime? @map("deleted_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  user        User         @relation("AdvanceUser", fields: [userId], references: [id], onDelete: Cascade)
+  createdBy   User?        @relation("AdvanceCreatedBy", fields: [createdById], references: [id])
+  /// Dòng chi tương ứng bên Tài chính (PAYROLL_SYNC).
+  transaction Transaction?
+
+  @@index([userId, advanceDate])
+  @@index([advanceDate])
+  @@map("salary_advances")
+}
+
+enum PayrollStatus {
+  DRAFT // Đang làm — bấm "Tính lại" là nạp lại số công từ bảng chấm công
+  LOCKED // Đã chốt — đóng băng, không tính lại nữa
+}
+
+/// Kỳ lương một tháng.
+model PayrollPeriod {
+  id     String        @id @default(cuid())
+  year   Int
+  month  Int
+  status PayrollStatus @default(DRAFT)
+
+  /// Ngày chốt công: công tới hết ngày này tính vào kỳ này, phần còn lại của
+  /// tháng chuyển sang kỳ tháng sau và tính theo mức lương tháng sau. Null = hết
+  /// tháng. Dùng khi trả lương sớm trước Tết: tháng 2 chốt đến 25/2, ba ngày
+  /// 26–28/2 cộng vào bảng lương tháng 3.
+  cutoffDay Int? @map("cutoff_day")
+
+  lockedAt    DateTime? @map("locked_at")
+  lockedById  String?   @map("locked_by_id")
+  createdById String?   @map("created_by_id")
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  lines        PayrollLine[]
+  lockedBy     User?         @relation("PayrollLockedBy", fields: [lockedById], references: [id])
+  /// Dòng "Chi lương" / "BHXH" bên Tài chính, sinh khi chốt kỳ (PAYROLL_SYNC).
+  transactions Transaction[]
+
+  @@unique([year, month])
+  @@map("payroll_periods")
+}
+
+/// Một dòng bảng lương. Số liệu được CHỐT vào đây chứ không tính lại lúc đọc —
+/// bảng lương đã trả phải giữ nguyên kể cả khi sau này ai đó sửa bảng chấm công.
+/**
+ * Mốc lương có hiệu lực từ một tháng. Lương cơ bản và mức đóng BHXH đổi theo thời
+ * gian thật (vào làm ăn 80% lương, vài tháng sau mới đóng bảo hiểm, rồi tăng lương),
+ * nên không thể lưu một giá trị duy nhất trên User — tính lại tháng cũ sẽ lấy nhầm
+ * lương hiện tại. Mốc áp dụng từ `effectiveFrom` cho tới khi gặp mốc kế tiếp.
+ */
+model SalaryRecord {
+  id     String @id @default(cuid())
+  userId String @map("user_id")
+
+  /// Tháng bắt đầu hiệu lực, LUÔN là ngày 1. Kiểu `date` để không dính lệch múi
+  /// giờ như các cột timestamp khác — cùng lý do với `AttendanceDay.workDate`.
+  effectiveFrom DateTime @map("effective_from") @db.Date
+
+  /// Lương cơ bản tháng (VND). Null = chưa khai.
+  baseSalary    Decimal? @map("base_salary") @db.Decimal(15, 0)
+  /// Mức đóng BHXH kể từ mốc này. Null = tháng đó KHÔNG đóng bảo hiểm.
+  insuranceBase Decimal? @map("insurance_base") @db.Decimal(15, 0)
+  /// Lương khoán: trả cố định theo tháng, số công không tham gia vào tiền.
+  isFixedSalary Boolean  @default(false) @map("is_fixed_salary")
+
+  note String?
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation("SalaryRecordUser", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, effectiveFrom])
+  @@index([userId, effectiveFrom])
+  @@map("salary_records")
+}
+
+model PayrollLine {
+  id       String @id @default(cuid())
+  periodId String @map("period_id")
+  userId   String @map("user_id")
+
+  /// Lương khoán: bỏ qua công, kế toán gõ thẳng tổng lương (Giám đốc, KT thuế…).
+  isFixedSalary Boolean @default(false) @map("is_fixed_salary")
+  baseSalary    Decimal @default(0) @map("base_salary") @db.Decimal(15, 0)
+
+  /// Công hành chính (ngày thường).
+  workDays     Decimal @default(0) @map("work_days") @db.Decimal(6, 2)
+  /// Công chủ nhật ĐÃ nhân hệ số (mặc định ×1.5) — khớp cột "CHỦ NHẬT" của Excel.
+  sundayDays   Decimal @default(0) @map("sunday_days") @db.Decimal(6, 2)
+  /// Công tăng ca = tổng giờ TC ÷ 4 — khớp cột "T.CA" của Excel.
+  overtimeDays Decimal @default(0) @map("overtime_days") @db.Decimal(6, 2)
+  /// Công chuyển từ đuôi tháng trước (sau ngày chốt công của kỳ trước), đã gồm
+  /// chủ nhật × hệ số và tăng ca — khớp cột "CÔNG + T.CA TỪ NGÀY 26/2–28/2".
+  carriedDays  Decimal @default(0) @map("carried_days") @db.Decimal(6, 2)
+  totalDays    Decimal @default(0) @map("total_days") @db.Decimal(6, 2)
+
+  /// Lương cơ bản ÷ 26 × tổng công. KHÔNG tự làm tròn — khách chốt tự gõ.
+  grossSalary   Decimal @default(0) @map("gross_salary") @db.Decimal(15, 0)
+  /// Số kế toán gõ ở cột "LƯƠNG LÀM TRÒN". Mặc định bằng grossSalary.
+  roundedSalary Decimal @default(0) @map("rounded_salary") @db.Decimal(15, 0)
+
+  advanceAmount      Decimal  @default(0) @map("advance_amount") @db.Decimal(15, 0)
+  /// Trừ vào lương (lấy ván, vật tư…). Tên cột giữ từ thời còn ghi "lấy ván +
+  /// vật tư" trong Excel; nay là khoản trừ chung, lý do ở `deductionNote`.
+  materialDeduction  Decimal  @default(0) @map("material_deduction") @db.Decimal(15, 0)
+  /// Lý do trừ lương, vd "Lấy 3 tấm ván MDF".
+  deductionNote      String?  @map("deduction_note")
+  /// Mức đóng BHXH áp dụng cho THÁNG NÀY, chụp lại từ mốc lương đang hiệu lực.
+  /// Không có cột này thì chỉ còn số tiền đã trừ, không truy ngược được tháng đó
+  /// đóng trên mức bao nhiêu khi kế toán đối chiếu với cơ quan bảo hiểm.
+  insuranceBase      Decimal? @map("insurance_base") @db.Decimal(15, 0)
+  /// Trừ lương: BHXH (mặc định 10.5% trên mức đóng riêng của từng người).
+  insuranceDeduction Decimal  @default(0) @map("insurance_deduction") @db.Decimal(15, 0)
+  /// Bảo hiểm phần CÔNG TY đóng (mặc định 21.5% trên cùng mức đóng đó).
+  /// KHÔNG trừ vào lương người lao động — chỉ là chi phí của công ty, chốt cùng kỳ.
+  employerInsurance  Decimal  @default(0) @map("employer_insurance") @db.Decimal(15, 0)
+
+  bonusSales          Decimal @default(0) @map("bonus_sales") @db.Decimal(15, 0)
+  bonusResponsibility Decimal @default(0) @map("bonus_responsibility") @db.Decimal(15, 0)
+  bonusAttendance     Decimal @default(0) @map("bonus_attendance") @db.Decimal(15, 0)
+  bonusPunctuality    Decimal @default(0) @map("bonus_punctuality") @db.Decimal(15, 0)
+  /// Thưởng ngoài 4 khoản cố định: thưởng Tết, chuyên cần tháng trước trả bù…
+  /// Lý do ghi ở `note`. Không cộng vào "Tổng thưởng" — đúng thứ tự cột Excel.
+  bonusOther          Decimal @default(0) @map("bonus_other") @db.Decimal(15, 0)
+  /// Trừ khác sau thưởng: quỹ văn phòng…
+  otherDeduction      Decimal @default(0) @map("other_deduction") @db.Decimal(15, 0)
+
+  /// Lương làm tròn − ứng lương − các khoản trừ.
+  totalSalary Decimal  @default(0) @map("total_salary") @db.Decimal(15, 0)
+  /// Tổng lương + tổng thưởng + thưởng khác − trừ khác.
+  netSalary   Decimal  @default(0) @map("net_salary") @db.Decimal(15, 0)
+  /// Số tiền chi ra thật (kế toán làm tròn lần cuối, vd 8.970.000 → 9.000.000).
+  /// Null = bằng thực nhận. Tài chính ghi theo cột này.
+  actualPaid  Decimal? @map("actual_paid") @db.Decimal(15, 0)
+
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  period PayrollPeriod @relation(fields: [periodId], references: [id], onDelete: Cascade)
+  user   User          @relation("PayrollUser", fields: [userId], references: [id])
+
+  @@unique([periodId, userId])
+  @@index([userId])
+  @@map("payroll_lines")
+}

@@ -1,0 +1,224 @@
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-weight: var(--font-weight-normal);
+  text-rendering: optimizeLegibility;
+  font-feature-settings: "kern" 1, "liga" 1;
+}
+
+::selection {
+  background: var(--color-brand-200);
+  color: var(--color-brand-950);
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+[data-lucide] {
+  stroke-width: 1.8;
+}
+
+.brand-gradient {
+  background: var(--theme-brand-gradient);
+  border-right: 1px solid var(--theme-color-sidebar-line);
+}
+
+.auth-brand-panel {
+  position: absolute;
+  inset: 0;
+  isolation: isolate;
+  overflow: hidden;
+  background: var(--theme-login-backdrop);
+}
+
+.auth-brand-panel::before {
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  content: "";
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--theme-color-brand-950) 88%, transparent) 0%,
+      color-mix(in srgb, var(--theme-color-brand-950) 72%, transparent) 38%,
+      color-mix(in srgb, var(--theme-color-brand-950) 30%, transparent) 60%,
+      transparent 78%
+    );
+}
+
+.auth-brand-panel::after {
+  position: absolute;
+  inset: auto -18% -28% 16%;
+  z-index: -1;
+  height: 52%;
+  content: "";
+  border-radius: var(--radius-full);
+  background: var(--theme-auth-glow);
+  filter: blur(64px);
+}
+
+.auth-brand-illustration {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: cover;
+  filter: saturate(0.76) contrast(0.92);
+  mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 42%,
+    rgb(0 0 0 / 0.82) 58%,
+    transparent 82%
+  );
+  transform: scale(1.01);
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    #000 0%,
+    #000 42%,
+    rgb(0 0 0 / 0.82) 58%,
+    transparent 82%
+  );
+}
+
+.tamnest-login-experience {
+  position: relative;
+  min-height: 100dvh;
+  background: var(--theme-login-backdrop);
+}
+
+.tamnest-login-experience > main {
+  min-height: 100dvh;
+  background: var(--theme-login-backdrop);
+}
+
+.tamnest-login-form-panel {
+  position: relative;
+  background: transparent;
+}
+
+.tamnest-login-form-card {
+  border: 1px solid var(--theme-color-line);
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--theme-color-surface) 94%, transparent);
+  box-shadow: var(--theme-shadow-dialog);
+  backdrop-filter: blur(12px);
+}
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+.dialog-backdrop {
+  animation: tamnest-fade-in var(--theme-motion-duration-default)
+    var(--theme-motion-easing-standard);
+}
+
+.dialog-panel {
+  animation: tamnest-dialog-in var(--theme-motion-duration-layout)
+    var(--theme-motion-easing-standard);
+}
+
+@keyframes tamnest-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes tamnest-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.99);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+@media (min-width: 768px) {
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--theme-scrollbar-thumb) var(--theme-scrollbar-track);
+  }
+}
+
+@media (max-width: 1023px) {
+  .auth-brand-panel {
+    padding: 0;
+  }
+
+  .auth-brand-panel::before {
+    background: color-mix(
+      in srgb,
+      var(--theme-color-background) 52%,
+      transparent
+    );
+  }
+
+  .auth-brand-panel::after {
+    display: none;
+  }
+
+  .auth-brand-illustration {
+    background-position: center;
+    filter: saturate(0.58) contrast(0.9);
+    mask-image: linear-gradient(
+      90deg,
+      #000 0%,
+      rgb(0 0 0 / 0.78) 62%,
+      rgb(0 0 0 / 0.42) 100%
+    );
+    transform: none;
+    -webkit-mask-image: linear-gradient(
+      90deg,
+      #000 0%,
+      rgb(0 0 0 / 0.78) 62%,
+      rgb(0 0 0 / 0.42) 100%
+    );
+  }
+
+  .tamnest-login-form-panel {
+    min-height: 100dvh;
+    padding: 4.75rem 1rem 2rem;
+  }
+
+  .tamnest-login-form-card {
+    max-width: 27rem;
+    padding: 1.75rem;
+  }
+}
+
+@media (min-width: 1024px) {
+  .auth-brand-panel {
+    padding: clamp(2.75rem, 4vw, 4.5rem);
+  }
+
+  .tamnest-login-form-panel {
+    width: 44%;
+    padding: 3rem clamp(2.5rem, 5vw, 5.5rem);
+  }
+
+  .tamnest-login-form-card {
+    max-width: 27rem;
+    padding: clamp(2rem, 3vw, 2.5rem);
+  }
+}

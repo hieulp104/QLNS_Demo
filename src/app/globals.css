@@ -1,0 +1,5 @@
+@import "tailwindcss";
+@import "../components/theme/tokens/index.css";
+@import "../components/theme/themes/tamnest/base.css";
+@import "../components/theme/themes/tamnest/classic/light/theme.css";
+@import "../components/theme/themes/tamnest/classic/dark/theme.css";

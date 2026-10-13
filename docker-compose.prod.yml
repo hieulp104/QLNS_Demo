@@ -1,0 +1,107 @@
+# ════════════════════════════════════════════════════════════════════
+# NA — PRODUCTION (self-host trên VPS).
+# Chạy:  docker compose -f docker-compose.prod.yml up -d
+#
+# Khác docker-compose.yml (dev):
+#  · Có service `app` (Next) + `caddy` (reverse proxy + HTTPS tự động).
+#  · Postgres & MinIO KHÔNG map cổng ra ngoài — chỉ nội bộ Docker network.
+#  · Biến nhạy cảm đọc từ .env (xem .env.example mục "CHỈ PRODUCTION").
+# ════════════════════════════════════════════════════════════════════
+name: na-demo
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: na-demo-app
+    restart: unless-stopped
+    # Nạp toàn bộ biến app (DATABASE_URL, AUTH_*, MINIO_*) từ .env.
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    expose:
+      - "3000" # chỉ nội bộ, Caddy proxy vào
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: na-demo-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: na
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Chua dat POSTGRES_PASSWORD trong .env}
+      POSTGRES_DB: na
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U na -d na"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  minio:
+    image: minio/minio:latest
+    container_name: na-demo-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?Chua dat MINIO_ACCESS_KEY trong .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?Chua dat MINIO_SECRET_KEY trong .env}
+      TZ: Asia/Ho_Chi_Minh
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Service dùng-một-lần cho migration & seed. Build từ stage `builder` của
+  # Dockerfile vì ở đó mới có Prisma CLI + tsx + source (ảnh `app` runtime đã
+  # loại devDependencies). KHÔNG chạy dài hạn — chỉ gọi qua `docker compose run`.
+  #   Migration:  docker compose -f docker-compose.prod.yml run --rm migrate
+  #   Seed 1 lần: docker compose -f docker-compose.prod.yml run --rm migrate npm run seed:prod
+  migrate:
+    profiles: ["tools"] # không tự bật khi `up`
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: npx prisma migrate deploy
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: na-demo-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Chua dat APP_DOMAIN trong .env}
+      STORAGE_DOMAIN: ${STORAGE_DOMAIN:?Chua dat STORAGE_DOMAIN trong .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data # chứng chỉ Let's Encrypt — đừng xóa
+      - caddy_config:/config
+    depends_on:
+      - app
+      - minio
+
+volumes:
+  postgres_data:
+  minio_data:
+  caddy_data:
+  caddy_config:
