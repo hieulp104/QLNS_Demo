@@ -5,6 +5,8 @@
  * Idempotent — chạy nhiều lần không tạo trùng.
  */
 import "dotenv/config";
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import bcrypt from "bcryptjs";
 import { PrismaPg } from "@prisma/adapter-pg";
 import { PrismaClient } from "../src/generated/prisma/client";
@@ -31,6 +33,7 @@ import { syncScheduledChecks } from "../src/modules/maintenance/maintenance.serv
 import { fillWorkdays, setMark } from "../src/modules/attendance/attendance.service";
 import { recalcPeriod } from "../src/modules/payroll/payroll.service";
 import { assertMigrated } from "./check-migrations";
+import { putObject } from "../src/lib/minio";
 
 const prisma = new PrismaClient({
   adapter: new PrismaPg({ connectionString: process.env.DATABASE_URL }),
@@ -54,7 +57,7 @@ const SEED_USERS: SeedUser[] = [
   {
     employeeCode: "TN001",
     email: "director@na.vn",
-    fullName: "Nguyễn Bá Thông",
+    fullName: "Phạm Văn Hiếu",
     phone: "0901000001",
     position: "Giám đốc",
     department: null,
@@ -498,6 +501,55 @@ const MATERIAL_CATALOG = [
   { name: "Kính cường lực 8mm", unit: "m2", category: "Kính" },
 ];
 
+/**
+ * Avatar minh họa cho một số tài khoản demo — ảnh ở prisma/seed-assets/avatars
+ * (sinh bằng DiceBear "notionists", giấy phép CC0). Ai không có file thì giữ
+ * avatar chữ cái. Bỏ qua người đã có avatar (kể cả ảnh khách tự đổi qua UI).
+ */
+const AVATAR_DIR = path.join(__dirname, "seed-assets", "avatars");
+
+async function seedAvatars() {
+  let count = 0;
+  try {
+    for (const u of SEED_USERS) {
+      const name = u.email.split("@")[0];
+      const file = path.join(AVATAR_DIR, `${name}.png`);
+      if (!existsSync(file)) continue;
+
+      const user = await prisma.user.findUnique({
+        where: { email: u.email },
+        select: { id: true, avatarUrl: true },
+      });
+      if (!user || user.avatarUrl) continue;
+
+      // Key phải nằm dưới avatars/<userId>/ — cùng quy ước với luồng upload ở HR.
+      const objectKey = `avatars/${user.id}/seed-${name.replace(/\./g, "-")}.png`;
+      const body = readFileSync(file);
+      await putObject(objectKey, body, "image/png");
+      await prisma.$transaction([
+        prisma.fileAsset.upsert({
+          where: { objectKey },
+          update: { deletedAt: null },
+          create: {
+            objectKey,
+            fileName: `${name}.png`,
+            mimeType: "image/png",
+            sizeBytes: body.length,
+            kind: "AVATAR",
+            uploadedById: user.id,
+          },
+        }),
+        prisma.user.update({ where: { id: user.id }, data: { avatarUrl: objectKey } }),
+      ]);
+      count++;
+    }
+    console.log(`✔ ${count} avatar minh họa`);
+  } catch (error) {
+    // MinIO chưa bật thì vẫn seed tiếp — avatar chỉ là phần trang trí.
+    console.warn(`⚠ Bỏ qua avatar (MinIO không truy cập được): ${(error as Error).message}`);
+  }
+}
+
 async function main() {
   // Dừng sớm nếu DB còn ở schema cũ — nếu không, Prisma ném P2022 kèm stack
   // dài về một cột "không tồn tại", rất khó đoán ra là chỉ thiếu migrate.
@@ -646,6 +698,7 @@ async function main() {
     }
   }
   console.log(`✔ ${SEED_USERS.length} tài khoản (mật khẩu: ${DEFAULT_PASSWORD})`);
+  await seedAvatars();
 
   // ── 5. Danh mục vật tư mẫu ──────────────────────────────────
   for (const m of MATERIAL_CATALOG) {

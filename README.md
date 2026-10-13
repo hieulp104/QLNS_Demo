@@ -36,32 +36,38 @@ npm run dev             # http://localhost:3000
 
 ## Deploy lên VPS demo
 
-Yêu cầu: VPS Ubuntu có Docker + Docker Compose plugin, cổng 80/443 mở, hai bản ghi DNS A
+Kiểu deploy: **pull-and-build trên server** — `git pull` code mới rồi Docker Compose
+build lại ảnh ngay trên VPS. Mỗi lần `up`, service `migrate` tự chạy migration + nạp
+dữ liệu demo (`db:seed`, kèm avatar) rồi mới bật app.
+
+Yêu cầu: VPS có Docker + Docker Compose plugin, cổng 80/443 mở, hai bản ghi DNS A
 (app + storage) trỏ về IP VPS.
 
+### Lần đầu
+
 ```bash
-# 1. Đưa code lên VPS (git clone repo demo, hoặc scp thư mục này) vào ~/qlns-demo
-cd ~/qlns-demo
-
-# 2. Tạo .env — sinh MỚI mọi mật khẩu/khóa, không dùng lại của hệ thống thật
+git clone https://github.com/hieulp104/QLNS_Demo.git /opt/demo/qlns-demo
+cd /opt/demo/qlns-demo
 cp .env.example .env
-nano .env    # sửa theo mục "CHỈ PRODUCTION" ở cuối file
-
-# 3. Build + bật DB/MinIO + migration
-docker compose -f docker-compose.prod.yml build app migrate
-docker compose -f docker-compose.prod.yml up -d postgres minio
-docker compose -f docker-compose.prod.yml run --rm migrate
-
-# 4. Nạp DỮ LIỆU MẪU (db:seed, KHÔNG phải seed:prod)
-docker compose -f docker-compose.prod.yml run --rm migrate npm run db:seed
-
-# 5. Bật app + Caddy (tự xin HTTPS)
-docker compose -f docker-compose.prod.yml up -d
+nano .env    # sửa theo mục "CHỈ PRODUCTION" ở cuối file — sinh MỚI mọi mật khẩu/khóa
+docker compose -f docker-compose.prod.yml up -d --build
 ```
 
-Làm mới dữ liệu demo sau khi khách bấm lung tung:
+### Các lần sau
+
+```bash
+ssh root@<IP-VPS>
+cd /opt/demo/qlns-demo
+git pull
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+Seed idempotent: dữ liệu khách tạo thêm được giữ, chỉ bản ghi mẫu (tên, phòng ban…)
+được đưa về đúng `prisma/seed.ts`. Xem log seed: `docker compose -f docker-compose.prod.yml logs migrate`.
+
+Làm mới hoàn toàn dữ liệu demo sau khi khách bấm lung tung:
 
 ```bash
 docker compose -f docker-compose.prod.yml run --rm migrate npx prisma migrate reset --force
-docker compose -f docker-compose.prod.yml run --rm migrate npm run db:seed
+docker compose -f docker-compose.prod.yml run --rm migrate
 ```

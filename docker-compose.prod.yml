@@ -1,6 +1,7 @@
 # ════════════════════════════════════════════════════════════════════
 # NA — PRODUCTION (self-host trên VPS).
-# Chạy:  docker compose -f docker-compose.prod.yml up -d
+# Chạy:  docker compose -f docker-compose.prod.yml up -d --build
+#        (tự migrate + nạp dữ liệu demo qua service `migrate` trước khi bật app)
 #
 # Khác docker-compose.yml (dev):
 #  · Có service `app` (Next) + `caddy` (reverse proxy + HTTPS tự động).
@@ -21,6 +22,8 @@ services:
     environment:
       NODE_ENV: production
     depends_on:
+      migrate:
+        condition: service_completed_successfully
       postgres:
         condition: service_healthy
       minio:
@@ -62,24 +65,30 @@ services:
       timeout: 5s
       retries: 5
 
-  # Service dùng-một-lần cho migration & seed. Build từ stage `builder` của
-  # Dockerfile vì ở đó mới có Prisma CLI + tsx + source (ảnh `app` runtime đã
-  # loại devDependencies). KHÔNG chạy dài hạn — chỉ gọi qua `docker compose run`.
-  #   Migration:  docker compose -f docker-compose.prod.yml run --rm migrate
-  #   Seed 1 lần: docker compose -f docker-compose.prod.yml run --rm migrate npm run seed:prod
+  # Chạy MỖI lần `up`: migration + nạp dữ liệu demo, xong thì thoát; `app` chỉ
+  # bật sau khi service này thành công. Seed idempotent — dữ liệu khách tạo thêm
+  # vẫn giữ, chỉ các bản ghi mẫu được đưa về đúng giá trị trong seed.ts.
+  # Build từ stage `builder` vì ở đó mới có Prisma CLI + tsx + source.
   migrate:
-    profiles: ["tools"] # không tự bật khi `up`
     build:
       context: .
       dockerfile: Dockerfile
       target: builder
+    restart: "no"
     env_file: .env
     environment:
       NODE_ENV: production
+      # Seed upload avatar thẳng vào MinIO qua mạng nội bộ — lúc này Caddy (và
+      # domain storage công khai trong .env) chưa chắc đã chạy.
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
     depends_on:
       postgres:
         condition: service_healthy
-    command: npx prisma migrate deploy
+      minio:
+        condition: service_healthy
+    command: sh -c "npx prisma migrate deploy && npm run db:seed"
 
   caddy:
     image: caddy:2-alpine
